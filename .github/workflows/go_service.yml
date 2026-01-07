@@ -1,0 +1,24 @@
+name: go service
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  checks: write
+
+on:
+  workflow_call:
+    secrets:
+      gh_token:
+        required: true
+      vault_addr:
+        required: true
+
+jobs:
+  go_service:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call checks workflow
+        uses: ./.github/workflows/go_check.yml
+        with:
+          gh_token: ${{ secrets.github_token }}

@@ -1,0 +1,174 @@
+name: version
+
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  checks: write
+
+on:
+  workflow_call:
+    secrets:
+      gh_token:
+        required: true
+      vault_addr:
+        required: true
+
+jobs:
+  version:
+    # heuristic fallback: run on pushes to main; internal steps check FORCE_HEURISTIC
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+    steps:
+      - name: Import Secrets
+        id: import-secrets
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: github
+          githubToken: ${{ secrets.GH_TOKEN }}
+          secrets: |
+            kv/data/ci/actions github_token | GITHUB_TOKEN ;
+            kv/data/ci/actions docker_username | DOCKER_USERNAME ;
+            kv/data/ci/actions docker_password | DOCKER_PASSWORD ;
+            kv/data/ci/actions docker_registry | DOCKER_REGISTRY
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: "${{ steps.import-secrets.outputs.GITHUB_TOKEN }}"
+
+      - name: Determine next semver from conventional commits (only if FORCE_HEURISTIC=true)
+        id: set-version
+        env:
+          FORCE_HEURISTIC: ${{ secrets.FORCE_HEURISTIC }}
+        run: |
+          set -euo pipefail
+          if [ "${FORCE_HEURISTIC:-}" != "true" ]; then
+            echo "Skipping heuristic versioning because FORCE_HEURISTIC is not set to 'true'"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --tags
+          # get latest tag or default 0.0.0
+          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            LATEST_TAG=$(git describe --tags --abbrev=0)
+          else
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "Latest tag: $LATEST_TAG"
+          LATEST=${LATEST_TAG#v}
+          IFS='.' read -r MAJ MIN PATCH <<<"$LATEST"
+          # collect commit messages since last tag
+          COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=%B || true)
+          echo "Commits to consider:\n$COMMITS"
+          BUMP="patch"
+          if echo "$COMMITS" | grep -qE "BREAKING[[:space:]]CHANGE|!:"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE "^feat\b|^feat\("; then
+            BUMP="minor"
+          fi
+          echo "Determined bump: $BUMP"
+          case "$BUMP" in
+            major)
+              NEW_MAJOR=$((MAJ+1)); NEW_MIN=0; NEW_PATCH=0;;
+            minor)
+              NEW_MAJOR=$MAJ; NEW_MIN=$((MIN+1)); NEW_PATCH=0;;
+            *)
+              NEW_MAJOR=$MAJ; NEW_MIN=$MIN; NEW_PATCH=$((PATCH+1));;
+          esac
+          NEW_VERSION="v${NEW_MAJOR}.${NEW_MIN}.${NEW_PATCH}"
+          echo "New version: $NEW_VERSION"
+          # create annotated tag and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          git push origin "$NEW_VERSION"
+          # create simple release notes from commits
+          NOTES=$(git log ${LATEST_TAG}..HEAD --pretty=format:'- %s (%h)') || true
+          if [ -z "$NOTES" ]; then
+            NOTES="No significant changes"
+          fi
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "version=${NEW_VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        if: ${{ steps.set-version.outputs.version != '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.set-version.outputs.version }}
+          release_name: Release ${{ steps.set-version.outputs.version }}
+          body: |
+            ${{ steps.set-version.outputs.version }} - Changes since last tag:
+            ${{ steps.set-version.outputs.RELEASE_NOTES }}
+
+  semantic_release:
+    # default semantic-release flow on main (Conventional Commits)
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm ci || true
+          npx semantic-release || true
+
+  release:
+    needs: [version, semantic_release]
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and push release images (version, latest, sha6)
+        env:
+          REGISTRY: ${{ secrets.REGISTRY }}
+          IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REGISTRY}" ]; then
+            echo "REGISTRY not set, skipping docker build/push"
+            exit 0
+          fi
+          if [ -z "${IMAGE_NAME}" ]; then IMAGE_NAME="sys-int/restore-services"; fi
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          # Determine version: prefer heuristic job output if set, otherwise use latest tag
+          VERSION=""
+          if [ -n "${{ needs.version.outputs.version }}" ]; then
+            VERSION="${{ needs.version.outputs.version }}"
+          else
+            # fetch tags and get latest
+            git fetch --tags
+            if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+              TAG=$(git describe --tags --abbrev=0)
+              VERSION="${TAG#v}"
+            else
+              echo "No tag found; cannot determine version, aborting image push"
+              exit 0
+            fi
+          fi
+          SHA_TAG="${GITHUB_SHA:0:6}"
+          echo "Building image ${IMAGE}:${VERSION}"
+          docker build -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" -t "${IMAGE}:${SHA_TAG}" .
+          docker push "${IMAGE}:${VERSION}"
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${SHA_TAG}"

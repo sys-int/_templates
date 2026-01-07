@@ -1,0 +1,59 @@
+name: checks
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  checks: write
+
+on:
+  workflow_call:
+    secrets:
+      gh_token:
+        required: true
+      vault_addr:
+        required: true
+
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      GOMODCACHE: ${{ github.workspace }}/.cache/go/pkg/mod
+      GOPATH: ${{ github.workspace }}/.cache/go
+    # strategy:
+    #   matrix:
+    #     task: [commitlint, gofmt, vet, golangci-lint, test, shellcheck, deploy-dryrun]
+    steps:
+      - name: Import Secrets
+        id: import-secrets
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: github
+          githubToken: ${{ secrets.GH_TOKEN }}
+          secrets: |
+            kv/data/ci/actions github_token | GITHUB_TOKEN ;
+            kv/data/ci/actions docker_username | DOCKER_USERNAME ;
+            kv/data/ci/actions docker_password | DOCKER_PASSWORD ;
+            kv/data/ci/actions docker_registry | DOCKER_REGISTRY
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: "${{ steps.import-secrets.outputs.GITHUB_TOKEN }}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "**/*.sum"
+          cache: true
+
+      - name: Check commit messages
+        uses: cocogitto/cocogitto-action@v4.1.0
+        with:
+          command: check
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.6

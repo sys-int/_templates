@@ -1,0 +1,111 @@
+name: build
+
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  checks: write
+
+on:
+   workflow_call:
+    secrets:
+      gh_token:
+        required: true
+      vault_addr:
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GOMODCACHE: ${{ github.workspace }}/.cache/go/pkg/mod
+      GOPATH: ${{ github.workspace }}/.cache/go
+    steps:
+      - name: Import Secrets
+        id: import-secrets
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: github
+          githubToken: ${{ secrets.GH_TOKEN }}
+          secrets: |
+            kv/data/ci/actions github_token | GITHUB_TOKEN ;
+            kv/data/ci/actions docker_username | DOCKER_USERNAME ;
+            kv/data/ci/actions docker_password | DOCKER_PASSWORD ;
+            kv/data/ci/actions docker_registry | DOCKER_REGISTRY
+      - name: DEBUG
+        run: |
+          env | sort
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: "${{ steps.import-secrets.outputs.GITHUB_TOKEN }}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: "**/*.sum"
+          cache: true
+
+      - name: Go mod tidy
+        run: go mod tidy
+
+      - name: Build binary
+        run: CGO_ENABLED=0 GOOS=linux go build -v -o restore-service ./cmd/restore-service
+
+      - name: Login to registry
+        # only login/push in build for non-main branches; main uses the release job
+        if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' }}
+        env:
+          REGISTRY: ${{ steps.import-secrets.outputs.DOCKER_REGISTRY }}
+          REGISTRY_USERNAME: ${{ steps.import-secrets.outputs.DOCKER_USERNAME }}
+          REGISTRY_PASSWORD: ${{ steps.import-secrets.outputs.DOCKER_PASSWORD }}
+        run: |
+          if [ -z "${REGISTRY}" ]; then
+            echo "REGISTRY not set, skipping docker login"
+            exit 0
+          fi
+          echo "Logging in to registry ${REGISTRY}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY}" -u "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Build and push docker image
+        if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' }}
+        env:
+          REGISTRY: ${{ steps.import-secrets.outputs.DOCKER_REGISTRY }}
+          IMAGE_NAME: ${{github.repository}}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          if [ -z "${REGISTRY}" ]; then
+            echo "REGISTRY not set, skipping docker build/push"
+            exit 0
+          fi
+
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          # Use short sha (first 6 chars) for image tag
+          SHA_TAG="${GITHUB_SHA:0:6}"
+
+          # If this is develop branch, also push 'develop' tag
+          if [ "${GITHUB_REF}" = "refs/heads/develop" ]; then
+            echo "Building image ${IMAGE}:develop"
+            docker build -t "${IMAGE}:develop" .
+            docker push "${IMAGE}:develop"
+          fi
+
+          # For main branch we push the SHA tag (already done), 'latest' and 'version' tags
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "Building image ${IMAGE}:${SHA_TAG}"
+            docker build -t "${IMAGE}:${SHA_TAG}" .
+            docker push "${IMAGE}:${SHA_TAG}"
+
+            echo "Tagging and pushing ${IMAGE}:${GITHUB_REF_NAME}"
+            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:${GITHUB_REF_NAME}"
+            docker push "${IMAGE}:${GITHUB_REF_NAME}"
+            echo "Tagging and pushing ${IMAGE}:latest"
+            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          fi
+
