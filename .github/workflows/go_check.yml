@@ -53,6 +53,7 @@ jobs:
         uses: cocogitto/cocogitto-action@v4.1.0
         with:
           command: check
+          args: --ignore-merge-commits
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
