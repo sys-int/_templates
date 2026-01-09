@@ -8,22 +8,23 @@ permissions:
   checks: write
 
 on:
-  repository_dispatch:
-    types: [my-event]
-# on:
-#   workflow_call:
-#     secrets:
-#       gh_token:
-#         required: true
-#       vault_addr:
-#         required: true
+  workflow_call:
+    secrets:
+      gh_token:
+        required: true
+      vault_addr:
+        required: true
 
 jobs:
   version:
+    # # heuristic fallback: run on pushes to main; internal steps check FORCE_HEURISTIC
+    # if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
     steps:
       - name: Import Secrets
         id: import-secrets
@@ -46,6 +47,6 @@ jobs:
         uses: cocogitto/cocogitto-action@v4
         with:
           command: bump
-          args: --auto --ignore-merge-commits
+          args: --auto
           git-user: 'Bot'
           git-user-email: 'build@sys-int.de'
