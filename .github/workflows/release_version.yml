@@ -17,8 +17,6 @@ on:
 
 jobs:
   version:
-    # # heuristic fallback: run on pushes to main; internal steps check FORCE_HEURISTIC
-    # if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
