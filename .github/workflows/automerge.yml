@@ -22,7 +22,7 @@ on:
   check_suite:
     types:
       - completed
-  status: {}
+  status:
 jobs:
   automerge:
     if: ${{ github.event.pull_request.base.ref == 'main' || github.event.pull_request.base.ref == 'develop' }}
