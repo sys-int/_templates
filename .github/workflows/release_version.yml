@@ -36,7 +36,7 @@ jobs:
             kv/data/ci/actions docker_username | DOCKER_USERNAME ;
             kv/data/ci/actions docker_password | DOCKER_PASSWORD ;
             kv/data/ci/actions docker_registry | DOCKER_REGISTRY
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: "${{ steps.import-secrets.outputs.GITHUB_TOKEN }}"
