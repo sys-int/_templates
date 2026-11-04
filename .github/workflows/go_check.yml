@@ -50,7 +50,7 @@ jobs:
           cache: true
 
       - name: Check commit messages
-        uses: cocogitto/cocogitto-action@v4.1.0
+        uses: cocogitto/cocogitto-action@v4.2.0
         with:
           command: check
           args: --ignore-merge-commits
